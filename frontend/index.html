@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SubStream.ai — Subtitles in English, Hindi & Punjabi</title>
+  <link rel="stylesheet" href="styles.css?v=3">
+</head>
+<body>
+  <div class="ambient-glow-top"></div>
+  <div class="ambient-glow-side"></div>
+
+  <header class="nav-container">
+    <div class="brand-logo-pill"><span class="brand-dot"></span><span>SubStream.ai</span></div>
+    <nav class="nav-links">
+      <span class="nav-link" id="navUpload">Upload video</span>
+      <span class="nav-link" id="navLink">Paste link</span>
+      <span class="nav-link" id="navKeys">Shortcuts</span>
+    </nav>
+  </header>
+
+  <section class="hero-section">
+    <div class="eyebrow-tag">AI SUBTITLES · ENGLISH · हिन्दी · ਪੰਜਾਬੀ</div>
+    <h1 class="hero-headline">Generate <span class="gradient-text">subtitles</span> for any video, in your <span class="gradient-text">language</span>.</h1>
+    <p class="hero-subheadline">Upload a WhatsApp video or paste a YouTube / web link. We transcribe the speech with Whisper and translate it into Hindi, Punjabi or English.</p>
+
+    <div class="input-capsule-wrapper">
+      <svg class="search-icon-svg" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.8 12H3m0 0l4-4m-4 4l4 4M21 12a9 9 0 11-18 0"/></svg>
+      <input type="text" id="videoLinkInput" class="hero-input" placeholder="Paste a YouTube or video link, or drop a file anywhere…">
+      <input type="file" id="localFileInput" accept="video/*,audio/*" style="display:none">
+      <button class="btn-search-white" id="btnMainAction">Generate</button>
+    </div>
+
+    <div class="filter-pills-row">
+      <button class="filter-pill" id="pillUploadLocal"><span>Upload / WhatsApp video</span></button>
+      <select class="filter-pill select-pill" id="spokenLang" title="Language spoken in the video">
+        <option value="auto">Spoken: Auto-detect</option>
+        <option value="en">Spoken: English</option>
+        <option value="hi">Spoken: Hindi</option>
+        <option value="pa">Spoken: Punjabi</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="showcase-stage-wrapper">
+    <div class="benchmark-card" id="dropZone">
+      <div class="card-header-bar">
+        <span class="header-tag" id="statusTag">Ready</span>
+        <span class="header-id" id="sourceLabel">No video yet</span>
+      </div>
+
+      <div class="progress-wrap" id="progressWrap" hidden>
+        <div class="progress-label"><span id="progressText">Starting…</span><span id="progressPct">0%</span></div>
+        <div class="metric-track-bar"><div class="metric-progress-white" id="progressBar" style="width:0%"></div></div>
+      </div>
+
+      <div class="video-preview-frame" id="videoFrame">
+        <div class="empty-state" id="emptyState" role="button" tabindex="0">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0L7 9m5-5l5 5"/><path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"/></svg>
+          <strong>Drop a video here, or click to upload</strong>
+          <span>MP4, MOV, MKV, AVI, WhatsApp videos · or paste a link above</span>
+        </div>
+        <video id="video" playsinline preload="metadata"></video>
+        <div class="caption-floating-banner" id="captionBanner">
+          <div class="caption-pill-box">
+            <div class="caption-txt-primary" id="capPrimary"></div>
+            <div class="caption-txt-secondary" id="capSecondary" style="display:none"></div>
+          </div>
+        </div>
+
+        <div class="floating-media-controller" id="mediaController">
+          <button class="btn-circle-play" id="btnPlay" title="Play / Pause (Space)">
+            <svg viewBox="0 0 24 24" id="playIcon"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          </button>
+          <div class="scrubber-track-outer" id="scrubber"><div class="scrubber-progress-fill" id="scrubFill"></div></div>
+          <span class="time-readout" id="timeReadout">0:00 / 0:00</span>
+          <select class="speed-select" id="speed" title="Playback speed">
+            <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option><option value="2">2×</option>
+          </select>
+          <button class="btn-fullscreen" id="btnFullscreen" title="Full screen (f)">
+            <svg viewBox="0 0 24 24" id="fullscreenIcon">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="lang-bar">
+        <div class="segmented" role="tablist" aria-label="Caption language">
+          <button class="seg active" data-lang="en">English</button>
+          <button class="seg" data-lang="hi">हिन्दी</button>
+          <button class="seg" data-lang="pa">ਪੰਜਾਬੀ</button>
+        </div>
+        <button class="seg-toggle" id="pillBilingual">Bilingual captions</button>
+      </div>
+
+      <div class="stats-box" id="statsBox" hidden>
+        <div class="stat"><span>Detected language</span><b id="detectedLang">—</b></div>
+        <div class="stat"><span>Confidence</span><b id="heroScore">—</b></div>
+        <div class="stat"><span>Speech coverage</span><b id="valCoverage">—</b></div>
+        <div class="stat"><span>Subtitle lines</span><b id="valLines">—</b></div>
+      </div>
+
+      <div class="transcript-toolbar">
+        <input type="search" id="searchBox" class="search-box" placeholder="Search the transcript…">
+        <label class="toggle"><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
+        <button class="btn-export-pill" id="btnCopy">Copy text</button>
+      </div>
+      <div class="transcript-compact-grid" id="transcriptGrid">
+        <div class="transcript-empty">Subtitles will appear here once your video is processed.</div>
+      </div>
+
+      <div class="export-bar-bottom">
+        <span>Download subtitles</span>
+        <div class="export-btn-group">
+          <button class="btn-export-pill" id="expSRT">.SRT</button>
+          <button class="btn-export-pill" id="expVTT">.VTT</button>
+          <button class="btn-export-pill" id="expTXT">.TXT</button>
+          <button class="btn-export-pill" id="expJSON">.JSON</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="app.js?v=3"></script>
+</body>
+</html>
