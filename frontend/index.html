@@ -16,6 +16,7 @@
       <span class="nav-link" id="navUpload">Upload video</span>
       <span class="nav-link" id="navLink">Paste link</span>
       <span class="nav-link" id="navKeys">Shortcuts</span>
+      <span class="nav-link" id="navPhone">Use on phone</span>
     </nav>
   </header>
 
@@ -123,7 +124,16 @@
       </div>
     </div>
   </section>
-
+<div class="modal" id="phoneModal" hidden>
+  <div class="modal-card">
+    <button class="modal-close" id="phoneClose" aria-label="Close">×</button>
+    <h3>Use it on your phone</h3>
+    <p>Connect your phone to the same Wi-Fi as this computer, then scan this code with the phone camera.</p>
+    <div class="qr-box" id="qrBox"></div>
+    <div class="phone-url" id="phoneUrl"></div>
+    <p id="phoneNote"></p>
+  </div>
+</div>
   <div class="toast" id="toast" hidden></div>
   <script src="app.js?v=3"></script>
 </body>

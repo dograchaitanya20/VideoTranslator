@@ -1,37 +1,64 @@
-"""SubStream backend: video in -> real subtitles out (Whisper) -> translate (en/hi/pa)."""
+"""SubStream backend: video in -> real subtitles out (Whisper) -> translate (en/hi/pa).
+
+Two engines, chosen automatically:
+  * GROQ_API_KEY set  -> cloud mode (free hosted Whisper; tiny server, good for free hosting)
+  * no key            -> local mode (faster-whisper on this computer; works offline)
+"""
+import io
 import math
 import os
 import re
 import shutil
+import socket
 import subprocess
-import time
 import threading
+import time
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+
+def find_ffmpeg():
+    """Use the system FFmpeg if present, otherwise the copy bundled with imageio-ffmpeg."""
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+FFMPEG = find_ffmpeg()
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
-MODEL_NAME = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large-v3
+
+MODEL_NAME = os.environ.get("WHISPER_MODEL", "small")  # local mode: tiny/base/small/medium/large-v3
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "whisper-large-v3")
+USE_GROQ = bool(GROQ_API_KEY)
+HOSTED = os.environ.get("HOSTED", "") == "1"                  # running on a public server
 LANGS = {"en", "hi", "pa"}
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "300"))
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "20"))        # longest video accepted
 JOB_TTL_HOURS = float(os.environ.get("JOB_TTL_HOURS", "6"))   # delete old files after this
 YT_COOKIES = os.environ.get("YT_COOKIES", "")                 # optional cookies.txt path
+PHONE_MODE = os.environ.get("ALLOW_PHONE", "1") == "1"        # let phones on the same Wi-Fi connect
 BROWSER_OK = {".mp4", ".webm", ".m4v"}
+LANG_CODES = {"english": "en", "hindi": "hi", "punjabi": "pa", "panjabi": "pa"}
 
 app = FastAPI(title="SubStream")
 JOBS: dict[str, dict] = {}
 _model = None
 _model_lock = threading.Lock()
-TRANSCRIBE_LOCK = threading.Semaphore(1)  # one transcription at a time (CPU is the bottleneck)
+TRANSCRIBE_LOCK = threading.Semaphore(1)  # one local transcription at a time (CPU is the bottleneck)
 
 
 def get_model():
@@ -92,6 +119,7 @@ def download_url(job, url, folder):
             "format": fmt, "merge_output_format": "mp4",
             "outtmpl": str(folder / "source.%(ext)s"),
             "noplaylist": True, "quiet": True, "no_warnings": True, "no_color": True,
+            "ffmpeg_location": FFMPEG,
             "socket_timeout": 15,
             "retries": 3,
             "fragment_retries": 3,
@@ -118,6 +146,60 @@ def download_url(job, url, folder):
         "Try uploading the video file directly instead.")
 
 
+def transcribe_local(wav, lang_hint, job):
+    """faster-whisper on this computer. Returns (segments, language, duration)."""
+    import numpy as np
+    job.update(status="loading_model", progress=22)
+    model = get_model()
+    job.update(status="transcribing", progress=25)
+    # load the 16 kHz mono WAV ourselves (avoids a PyAV version clash inside faster-whisper)
+    with wave.open(str(wav), "rb") as w:
+        audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+    segs, info = model.transcribe(
+        audio, language=None if lang_hint == "auto" else lang_hint,
+        vad_filter=True, beam_size=5)
+    dur = info.duration or 1
+    out = []
+    for s in segs:
+        text = s.text.strip()
+        if not text:
+            continue
+        out.append({"start": round(s.start, 2), "end": round(s.end, 2),
+                    "text": text, "conf": math.exp(s.avg_logprob)})
+        job["progress"] = 25 + int(74 * min(1, s.end / dur))
+    return out, info.language, dur
+
+
+def transcribe_groq(audio_path, lang_hint):
+    """Hosted Whisper (Groq free tier). Returns (segments, language, duration)."""
+    import requests
+    data = {"model": GROQ_MODEL, "response_format": "verbose_json", "temperature": "0"}
+    if lang_hint != "auto":
+        data["language"] = lang_hint
+    with open(audio_path, "rb") as f:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": (audio_path.name, f, "audio/mpeg")}, data=data, timeout=900)
+    if r.status_code == 401:
+        raise RuntimeError("The transcription API key is not valid.")
+    if r.status_code == 429:
+        raise RuntimeError("The free transcription limit was reached. Please try again later.")
+    if r.status_code >= 400:
+        raise RuntimeError(f"Transcription service error ({r.status_code}): {r.text[:150]}")
+    j = r.json()
+    lang = str(j.get("language", "")).lower()
+    lang = LANG_CODES.get(lang, lang[:2])
+    out = []
+    for s in j.get("segments", []):
+        text = (s.get("text") or "").strip()
+        if text:
+            out.append({"start": round(float(s["start"]), 2), "end": round(float(s["end"]), 2),
+                        "text": text, "conf": math.exp(s.get("avg_logprob", -0.3))})
+    dur = float(j.get("duration") or (out[-1]["end"] if out else 0)) or 1
+    return out, lang, dur
+
+
 def pipeline(job_id, src, url, lang_hint):
     job = JOBS[job_id]
     folder = DATA / job_id
@@ -129,46 +211,41 @@ def pipeline(job_id, src, url, lang_hint):
             job.update(status="converting", progress=5)
 
         play = src  # the browser must be able to play it
-        if src.suffix.lower() not in BROWSER_OK:
+        if src.suffix.lower() not in BROWSER_OK and not HOSTED:  # skip the slow conversion on a weak free server
             job["status"] = "converting"
             play = folder / "preview.mp4"
-            run(["ffmpeg", "-y", "-i", str(src), "-c:v", "libx264", "-preset", "veryfast",
+            run([FFMPEG, "-y", "-i", str(src), "-c:v", "libx264", "-preset", "veryfast",
                  "-c:a", "aac", "-movflags", "+faststart", str(play)])
         job["media"] = str(play)
 
         job.update(status="extracting", progress=18)
-        wav = folder / "audio.wav"
-        run(["ffmpeg", "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
-
-        # reject very long videos (16 kHz 16-bit mono = 32,000 bytes per second)
-        minutes = wav.stat().st_size / 32000 / 60
+        if USE_GROQ:  # small CBR mp3 (32 kbps = 4,000 bytes per second) to fit the 25 MB API limit
+            audio_file = folder / "audio.mp3"
+            run([FFMPEG, "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+                 "-c:a", "libmp3lame", "-b:a", "32k", str(audio_file)])
+            minutes = audio_file.stat().st_size / 4000 / 60
+        else:         # 16 kHz 16-bit mono WAV = 32,000 bytes per second
+            audio_file = folder / "audio.wav"
+            run([FFMPEG, "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(audio_file)])
+            minutes = audio_file.stat().st_size / 32000 / 60
         if minutes > MAX_MINUTES:
             raise RuntimeError(f"This video is {minutes:.0f} min long; the limit is {MAX_MINUTES} min.")
+        if USE_GROQ and audio_file.stat().st_size > 24 * 1024 * 1024:
+            raise RuntimeError("This video is too long for free cloud transcription.")
 
-        job.update(status="queued", progress=20)  # waits here while another video is transcribing
-        with TRANSCRIBE_LOCK:
-            job.update(status="loading_model", progress=22)
-            model = get_model()
-            job.update(status="transcribing", progress=25)
-            # load the 16 kHz mono WAV ourselves (avoids a PyAV version clash inside faster-whisper)
-            with wave.open(str(wav), "rb") as w:
-                audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
-            segs, info = model.transcribe(
-                audio, language=None if lang_hint == "auto" else lang_hint,
-                vad_filter=True, beam_size=5)
-            dur = info.duration or 1
-            out, covered = [], 0.0
-            for s in segs:
-                text = s.text.strip()
-                if not text:
-                    continue
-                out.append({"id": len(out) + 1, "start": round(s.start, 2), "end": round(s.end, 2),
-                            "orig": text, "conf": math.exp(s.avg_logprob)})
-                covered += s.end - s.start
-                job["progress"] = 25 + int(74 * min(1, s.end / dur))
-        if not out:
+        if USE_GROQ:
+            job.update(status="transcribing", progress=40)
+            segs, src_lang, dur = transcribe_groq(audio_file, lang_hint)
+        else:
+            job.update(status="queued", progress=20)  # waits while another video is transcribing
+            with TRANSCRIBE_LOCK:
+                segs, src_lang, dur = transcribe_local(audio_file, lang_hint, job)
+
+        if not segs:
             raise RuntimeError("No speech was detected in this video.")
-        src_lang = info.language
+        out = [{"id": i + 1, "start": s["start"], "end": s["end"], "orig": s["text"], "conf": s["conf"]}
+               for i, s in enumerate(segs)]
+        covered = sum(s["end"] - s["start"] for s in out)
         if src_lang in LANGS:
             for s in out:
                 s[src_lang] = s["orig"]
@@ -294,6 +371,35 @@ threading.Thread(target=cleanup_loop, daemon=True).start()
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+def lan_ip():
+    """The computer's address on the local network (no data is actually sent)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+@app.get("/api/connect")
+def connect_info(request: Request):
+    """Address + QR code so a phone can open the app (public link when hosted, LAN address otherwise)."""
+    import qrcode
+    import qrcode.image.svg
+    if HOSTED:
+        url = str(request.base_url).rstrip("/")
+    else:
+        url = f"http://{lan_ip()}:{request.url.port or 8000}"
+    img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=10)
+    buf = io.BytesIO()
+    img.save(buf)
+    svg = buf.getvalue().decode()
+    svg = svg[svg.index("<svg"):]  # drop the XML header so it can be inlined in the page
+    return {"enabled": PHONE_MODE or HOSTED, "hosted": HOSTED, "url": url, "svg": svg}
 
 
 app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="static")
