@@ -23,10 +23,15 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 if errorlevel 1 goto fail
 
+if defined GROQ_API_KEY (
+  echo Cloud transcription key found - skipping the speech model download.
+  goto aftermodel
+)
 echo.
 echo Downloading the speech model (one time, several hundred MB)...
 python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8')"
 if errorlevel 1 goto fail
+:aftermodel
 
 where node >nul 2>nul
 if errorlevel 1 (
