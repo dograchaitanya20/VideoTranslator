@@ -141,6 +141,9 @@ def download_url(job, url, folder):
                 return path
         except Exception as e:
             last = ANSI.sub("", str(e)).replace("ERROR:", "").strip()
+    if HOSTED:
+        raise RuntimeError("YouTube and similar links are often blocked on this server. "
+                           "Please save the video to your device and upload the file instead.")
     raise RuntimeError(
         f"Could not download this link ({last[:160] if last else 'unknown error'}). "
         "Try uploading the video file directly instead.")
